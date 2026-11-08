@@ -1,0 +1,557 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Primitivum Bazooka</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo+Black&display=block" rel="stylesheet">
+<style>
+  /* Course Library palette (courses/web/app.css) */
+  :root {
+    --bg-hi: #ffffff; --bg: #f5f5f3; --bg-lo: #e6e6e2; --text-2: #50545a; --surface: #ffffff; --line: #deded9;
+    --accent: #1b6f5e; --accent-ink: #062019;
+    --ground-top: #deded9; --ground-bottom: #cfcfca; --ground-line: #c4c4be; --shadow: rgba(0,0,0,.18); --blend: source-over;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg-hi: #1d1f22; --bg: #111213; --bg-lo: #0b0c0d; --text-2: #a9adb2; --surface: #18191b; --line: #2b2d31;
+      --accent: #4dbfa3; --accent-ink: #062019;
+      --ground-top: #222427; --ground-bottom: #141517; --ground-line: #2b2d31; --shadow: rgba(0,0,0,.45); --blend: lighter;
+    }
+  }
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body {
+    background: radial-gradient(ellipse at 50% 18%, var(--bg-hi) 0%, var(--bg) 55%, var(--bg-lo) 100%);
+    color: var(--text-2); font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
+  #hud { position: fixed; left: 16px; top: 12px; pointer-events: none; letter-spacing: .02em; }
+  #win { position: fixed; inset: 0; display: none; place-items: center; text-align: center; pointer-events: none; }
+  #win h1 { font: 400 clamp(26px, 5vw, 56px) "Archivo Black", Impact, sans-serif; margin: 0; color: var(--accent); }
+  #win p { margin: .5em 0 0; }
+  #credit { position: fixed; right: 10px; bottom: 4px; max-width: calc(100% - 20px); text-align: right; font-size: 10px; opacity: .55; pointer-events: none; }
+  @media (max-width: 640px) {
+    #credit { top: 34px; left: 16px; right: auto; bottom: auto; max-width: calc(100% - 84px); text-align: left; font-size: 9px; }
+  }
+  #mute {
+    position: fixed; top: max(8px, env(safe-area-inset-top)); right: max(8px, env(safe-area-inset-right));
+    width: 44px; height: 44px; padding: 10px; border: 1px solid var(--line); border-radius: 50%;
+    background: var(--surface); color: var(--text-2); cursor: pointer; touch-action: manipulation;
+  }
+  #mute:hover { color: var(--accent); }
+  #mute:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #mute svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  #mute .spk { fill: currentColor; }
+  #mute .off, #mute[aria-pressed="true"] .on { display: none; }
+  #mute[aria-pressed="true"] .off { display: inline; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">loading…</div>
+<button id="mute" type="button" aria-pressed="false" aria-label="Turn sound off" title="Sound (M)">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path class="spk" d="M4 9h4l5-4v14l-5-4H4z"/><path class="on" d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12"/><path class="off" d="M16.5 9.5l5 5M21.5 9.5l-5 5"/></svg>
+</button>
+<div id="win"><div><h1>PRIMITIVUM DESTROYED</h1><p id="winText"></p><p>click to rebuild</p></div></div>
+<div id="credit">Bazooka M9A1: Armémuseum (Swedish Army Museum), CC BY 4.0 · Rocket M6A3C: U.S. War Department, public domain · via Wikimedia Commons · Sounds: Kenney, CC0</div>
+<script>
+'use strict';
+const TXT = 'PRIMITIVUM';
+const FAM = '"Archivo Black","Arial Black",Impact,sans-serif';
+const G = 1600;                                            // gravity, px/s²
+const BZ = { w: 1116, h: 184, axisY: 42, pivotX: 370 };    // bazooka.png: bore-axis row and shoulder pivot column
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const hud = document.getElementById('hud'), winEl = document.getElementById('win');
+const rnd = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const imgB = new Image(), imgR = new Image();
+imgB.src = 'assets/bazooka.png'; imgR.src = 'assets/rocket.png';
+
+const DPR = Math.min(2, window.devicePixelRatio || 1);
+let W, H, floorY, floorCv, floorCtx, pile;
+let FS = 100, letters = [], wordInk = { w: 0, h: 0 }, total0 = 1;
+const word = { x: 0, y: 0, vx: 0, vy: 0, phase: 0 };
+let rockets = [], chunks = [], shards = [], parts = [];
+let aim = -Math.PI / 2, aimTarget = aim, cooldown = 0, recoil = 0, shake = 0;
+let fired = 0, won = false, wonAt = 0, now = 0;
+
+function mk(w, h) { const c = document.createElement('canvas'); c.width = Math.max(1, Math.ceil(w)); c.height = Math.max(1, Math.ceil(h)); return c; }
+function sprite(stops) {
+  const c = mk(128, 128), g = c.getContext('2d'), gr = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  stops.forEach(([o, col]) => gr.addColorStop(o, col)); g.fillStyle = gr; g.fillRect(0, 0, 128, 128); return c;
+}
+// letter material in the library's teal; fire stays fire
+const INK = { top: '#6fd0b8', mid: '#4dbfa3', bottom: '#1b6f5e', side: '#155a4c', back: '#062019', stroke: 'rgba(6,32,25,.9)', dark: 'rgba(6,32,25,.13)', light: 'rgba(235,235,232,.12)' };
+let THEME = {};
+function readTheme() {
+  const cs = getComputedStyle(document.documentElement), v = n => cs.getPropertyValue('--' + n).trim();
+  THEME = { top: v('ground-top'), bottom: v('ground-bottom'), line: v('ground-line'), shadow: v('shadow'), blend: v('blend') || 'lighter' };
+}
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', readTheme);
+
+// ---------- sound: Kenney CC0 packs ----------
+// Over http(s) the files are decoded into Web Audio buffers (needed on iOS, which blocks <audio> started outside a tap).
+// Opened from disk, fetch() is blocked, so it falls back to cloning <audio> elements.
+const MASTER = .25;   // overall loudness; per-sound volumes below are relative to this
+const SFX = {}, BUF = {}, sfxLast = {};
+const AC = location.protocol.startsWith('http') && window.AudioContext ? new AudioContext() : null;
+let muted = false;
+try { muted = localStorage.getItem('primitivum-muted') === '1'; } catch (e) {}
+for (const [name, n] of [['launch', 1], ['blast', 5], ['rumble', 1], ['crash', 5], ['tink', 5]]) {
+  const urls = Array.from({ length: n }, (_, i) => `assets/sfx/${name}${n > 1 ? i : ''}.mp3`);
+  if (AC) Promise.all(urls.map(u => fetch(u).then(r => r.arrayBuffer()).then(b => AC.decodeAudioData(b)))).then(b => { BUF[name] = b; }).catch(() => {});
+  SFX[name] = urls.map(u => Object.assign(new Audio(u), { preload: 'auto' }));
+}
+function play(name, vol = 1, gap = 0) {   // gap: minimum seconds between two plays of this sound
+  if (muted || now - (sfxLast[name] || -9) < gap) return;
+  sfxLast[name] = now;
+  const v = clamp(vol, 0, 1) * MASTER, i = Math.random() * SFX[name].length | 0;
+  if (AC && BUF[name]) {
+    const src = AC.createBufferSource(), g = AC.createGain();
+    src.buffer = BUF[name][i]; g.gain.value = v; src.connect(g).connect(AC.destination); src.start();
+  } else {
+    const a = SFX[name][i].cloneNode(); a.volume = v; a.play().catch(() => {});
+  }
+}
+function setMuted(m) {
+  muted = m;
+  try { localStorage.setItem('primitivum-muted', m ? '1' : '0'); } catch (e) {}
+  const b = document.getElementById('mute');
+  b.setAttribute('aria-pressed', String(m)); b.setAttribute('aria-label', m ? 'Turn sound on' : 'Turn sound off');
+}
+
+const FIRE = sprite([[0, 'rgba(255,252,230,1)'], [.22, 'rgba(255,214,110,.95)'], [.5, 'rgba(255,120,30,.55)'], [1, 'rgba(140,30,0,0)']]);
+const SMOKE = sprite([[0, 'rgba(80,76,72,.85)'], [.55, 'rgba(62,58,55,.45)'], [1, 'rgba(40,40,40,0)']]);
+
+function resize() {
+  W = innerWidth; H = innerHeight;
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  floorY = H - Math.max(26, H * .045);
+  floorCv = mk(W * DPR, H * DPR); floorCtx = floorCv.getContext('2d'); floorCtx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  pile = new Float32Array(Math.ceil(W / 4) + 2);  // ponytail: resize clears the rubble pile; keep a shard list if that matters
+}
+const floorAt = x => floorY - pile[clamp(x / 4 | 0, 0, pile.length - 1)];
+
+// ---------- the word: one canvas per letter, pixels are the collision mask ----------
+function buildWord() {
+  const m = mk(4, 4).getContext('2d'), SP = .13;
+  m.font = `100px ${FAM}`;
+  let tw = 0; for (const ch of TXT) tw += m.measureText(ch).width + SP * 100;
+  FS = clamp(W * .4 / (tw / 100), 28, 92);
+  m.font = `${FS}px ${FAM}`;
+  const depth = Math.max(2, Math.round(FS * .045)), pad = Math.ceil(FS * .1) + depth;
+  letters = [];
+  let x = 0;
+  for (const ch of TXT) {
+    const adv = m.measureText(ch).width, w = adv + pad * 2, h = FS * 1.1 + pad * 2, base = pad + FS * .9;
+    const c = mk(w * DPR, h * DPR), g = c.getContext('2d', { willReadFrequently: true });
+    g.setTransform(DPR, 0, 0, DPR, 0, 0); g.font = m.font;
+    for (let d = depth; d > 0; d--) { g.fillStyle = d === depth ? INK.back : INK.side; g.fillText(ch, pad + d * .7, base + d); }
+    const gr = g.createLinearGradient(0, base - FS * .75, 0, base);
+    gr.addColorStop(0, INK.top); gr.addColorStop(.5, INK.mid); gr.addColorStop(1, INK.bottom);
+    g.fillStyle = gr; g.fillText(ch, pad, base);
+    g.lineWidth = Math.max(1, FS * .012); g.strokeStyle = INK.stroke; g.strokeText(ch, pad, base);
+    g.globalCompositeOperation = 'source-atop';           // speckle so shards read as material, not flat colour
+    for (let i = 0; i < w * h / 14; i++) {
+      g.fillStyle = Math.random() < .5 ? INK.dark : INK.light;
+      g.fillRect(Math.random() * w, Math.random() * h, rnd(.6, 2.2), rnd(.6, 2.2));
+    }
+    g.globalCompositeOperation = 'source-over';
+    const L = { c, g, w, h, ox: x - pad, oy: 0, on: true };
+    scan(L); L.n0 = L.n;
+    letters.push(L);
+    x += adv + SP * FS;
+  }
+  const x0 = Math.min(...letters.map(L => L.ox + L.ink.x0)), x1 = Math.max(...letters.map(L => L.ox + L.ink.x1));
+  const y0 = Math.min(...letters.map(L => L.ink.y0)), y1 = Math.max(...letters.map(L => L.ink.y1));
+  letters.forEach(L => { L.ox -= (x0 + x1) / 2; L.oy = -(y0 + y1) / 2; });
+  wordInk = { w: x1 - x0, h: y1 - y0 };
+  total0 = letters.reduce((s, L) => s + L.n0, 0);
+}
+
+function scan(L) {   // cache alpha, count solid pixels, ink bounding box (css px, letter space)
+  const cw = L.c.width, ch = L.c.height;
+  L.img = L.g.getImageData(0, 0, cw, ch);
+  const d = L.img.data;
+  let n = 0, x0 = cw, y0 = ch, x1 = -1, y1 = -1;
+  for (let y = 0, i = 3; y < ch; y++) for (let x = 0; x < cw; x++, i += 4) if (d[i] > 60) {
+    n++; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+  }
+  L.n = n; L.ink = n ? { x0: x0 / DPR, y0: y0 / DPR, x1: (x1 + 1) / DPR, y1: (y1 + 1) / DPR } : null;
+  if (!n) L.on = false;
+}
+
+function alphaAt(L, lx, ly) {
+  const px = (lx * DPR) | 0, py = (ly * DPR) | 0;
+  if (lx < 0 || ly < 0 || px >= L.c.width || py >= L.c.height) return 0;
+  return L.img.data[(py * L.c.width + px) * 4 + 3];
+}
+
+function testHit(x, y) {
+  for (const L of letters) if (L.on && alphaAt(L, x - word.x - L.ox, y - word.y - L.oy) > 60) return { kind: 'letter' };
+  for (let i = 0; i < letters.length - 1; i++) {   // the slot between two standing letters
+    const A = letters[i], B = letters[i + 1];
+    if (!A.on || !B.on) continue;
+    const gx0 = word.x + A.ox + A.ink.x1, gx1 = word.x + B.ox + B.ink.x0;
+    const gy0 = word.y + Math.max(A.oy + A.ink.y0, B.oy + B.ink.y0), gy1 = word.y + Math.min(A.oy + A.ink.y1, B.oy + B.ink.y1);
+    if (gx1 - gx0 > 1 && x > gx0 && x < gx1 && y > gy0 && y < gy1) {
+      const left = x - gx0 < gx1 - x;
+      return { kind: 'gap', L: left ? A : B, side: left ? -1 : 1 };
+    }
+  }
+  return null;
+}
+
+// ---------- fracture ----------
+function cutPiece(src, poly) {   // copy the pixels of src under polygon poly (css px) into a new tight canvas
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const p of poly) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
+  x0 = Math.floor(x0); y0 = Math.floor(y0); x1 = Math.ceil(x1); y1 = Math.ceil(y1);
+  const w = x1 - x0, h = y1 - y0;
+  if (w < 1 || h < 1) return null;
+  const c = mk(w * DPR, h * DPR), g = c.getContext('2d', { willReadFrequently: true });
+  g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  g.beginPath(); poly.forEach((p, i) => i ? g.lineTo(p[0] - x0, p[1] - y0) : g.moveTo(p[0] - x0, p[1] - y0)); g.closePath(); g.clip();
+  g.drawImage(src, -x0, -y0, src.width / DPR, src.height / DPR);
+  const d = g.getImageData(0, 0, c.width, c.height).data;
+  let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 50) n++;
+  return n < 3 * DPR * DPR ? null : { c, w, h, cx: x0 + w / 2, cy: y0 + h / 2 };
+}
+
+function carve(L, bx, by, R, rdx, rdy) {   // blast at world (bx,by): jagged hole, its pieces fly off as shards
+  const lx = bx - word.x - L.ox, ly = by - word.y - L.oy, N = 14, a0 = rnd(0, 6.283), out = [], inn = [];
+  for (let i = 0; i < N; i++) {
+    const a = a0 + (i + rnd(-.3, .3)) / N * 6.283, r = R * rnd(.7, 1.15), f = rnd(.35, .6);
+    out.push([lx + Math.cos(a) * r, ly + Math.sin(a) * r]);
+    inn.push([lx + Math.cos(a) * r * f, ly + Math.sin(a) * r * f]);
+  }
+  const baseX = word.x + L.ox, baseY = word.y + L.oy;
+  for (let i = 0; i < N; i++) {
+    const j = (i + 1) % N;
+    for (const poly of [[[lx, ly], inn[i], inn[j]], [inn[i], out[i], out[j], inn[j]]]) {
+      const p = cutPiece(L.c, poly); if (!p) continue;
+      const wx = baseX + p.cx, wy = baseY + p.cy, dx = wx - bx, dy = wy - by, dist = Math.hypot(dx, dy) || 1;
+      const sp = rnd(180, 520) * (1.1 - dist / R * .5);
+      shards.push({ c: p.c, w: p.w, h: p.h, x: wx, y: wy, a: 0, va: rnd(-10, 10), t: 0,
+        vx: dx / dist * sp + rdx * 140 + word.vx * .5, vy: dy / dist * sp + rdy * 140 - rnd(60, 220) });
+    }
+  }
+  const g = L.g;
+  g.save();
+  g.globalCompositeOperation = 'destination-out'; g.fillStyle = '#000';
+  g.beginPath(); out.forEach((p, i) => i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1])); g.closePath(); g.fill();
+  g.globalCompositeOperation = 'source-atop';   // scorch the rim that is left
+  const gr = g.createRadialGradient(lx, ly, R * .55, lx, ly, R * 1.6);
+  gr.addColorStop(0, 'rgba(30,14,4,.9)'); gr.addColorStop(.45, 'rgba(45,22,6,.45)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = gr; g.fillRect(lx - R * 1.7, ly - R * 1.7, R * 3.4, R * 3.4);
+  g.restore();
+  split(L, bx, by);
+}
+
+function split(L, bx, by) {   // pieces no longer connected to the main body fall off; a stub under 16 % crumbles
+  const cw = L.c.width, ch = L.c.height, img = L.g.getImageData(0, 0, cw, ch), d = img.data;
+  const lab = new Int32Array(cw * ch), stack = new Int32Array(cw * ch), comps = [];
+  for (let s = 0; s < cw * ch; s++) {
+    if (lab[s] || d[s * 4 + 3] <= 50) continue;
+    const cmp = { id: comps.length + 1, n: 0, x0: cw, y0: ch, x1: 0, y1: 0 }; comps.push(cmp);
+    let sp = 0; stack[sp++] = s; lab[s] = cmp.id;
+    while (sp) {
+      const p = stack[--sp], x = p % cw, y = (p / cw) | 0; cmp.n++;
+      if (x < cmp.x0) cmp.x0 = x; if (x > cmp.x1) cmp.x1 = x; if (y < cmp.y0) cmp.y0 = y; if (y > cmp.y1) cmp.y1 = y;
+      for (const q of [x > 0 ? p - 1 : -1, x < cw - 1 ? p + 1 : -1, y > 0 ? p - cw : -1, y < ch - 1 ? p + cw : -1])
+        if (q >= 0 && !lab[q] && d[q * 4 + 3] > 50) { lab[q] = cmp.id; stack[sp++] = q; }
+    }
+  }
+  for (let p = 0; p < cw * ch; p++) if (!lab[p]) d[p * 4 + 3] = 0;   // drop faint fringe left by the cut
+  const main = comps.reduce((a, b) => (b.n > a.n ? b : a), { n: 0 });
+  const crumble = main.n < L.n0 * .16;
+  for (const c of comps) {
+    if (c === main && !crumble) continue;
+    if (c.n < 25 * DPR * DPR) { zeroComp(d, lab, c, cw); continue; }
+    const bw = c.x1 - c.x0 + 1, bh = c.y1 - c.y0 + 1, cc = mk(bw, bh), cg = cc.getContext('2d', { willReadFrequently: true }), ci = cg.createImageData(bw, bh);
+    for (let y = c.y0; y <= c.y1; y++) for (let x = c.x0; x <= c.x1; x++) {
+      const p = y * cw + x; if (lab[p] !== c.id) continue;
+      const o = ((y - c.y0) * bw + (x - c.x0)) * 4, q = p * 4;
+      ci.data[o] = d[q]; ci.data[o + 1] = d[q + 1]; ci.data[o + 2] = d[q + 2]; ci.data[o + 3] = d[q + 3]; d[q + 3] = 0;
+    }
+    cg.putImageData(ci, 0, 0);
+    const wx = word.x + L.ox + (c.x0 + bw / 2) / DPR, wy = word.y + L.oy + (c.y0 + bh / 2) / DPR;
+    const dx = wx - bx, dy = wy - by, dist = Math.hypot(dx, dy) || 1;
+    chunks.push({ c: cc, w: bw / DPR, h: bh / DPR, x: wx, y: wy, a: 0, va: rnd(-3, 3),
+      vx: dx / dist * rnd(60, 180) + word.vx * .6, vy: dy / dist * rnd(60, 180) - 60 + word.vy * .6 });
+  }
+  L.g.putImageData(img, 0, 0);
+  scan(L);
+  if (crumble) L.on = false;
+}
+function zeroComp(d, lab, c, cw) {
+  for (let y = c.y0; y <= c.y1; y++) for (let x = c.x0; x <= c.x1; x++) { const p = y * cw + x; if (lab[p] === c.id) d[p * 4 + 3] = 0; }
+}
+
+function dropLetter(L, vx, vy, va) {   // whole letter knocked loose, falls intact until it hits the floor
+  const k = L.ink, x0 = Math.floor(k.x0 * DPR), y0 = Math.floor(k.y0 * DPR);
+  const bw = Math.ceil(k.x1 * DPR) - x0, bh = Math.ceil(k.y1 * DPR) - y0, cc = mk(bw, bh);
+  cc.getContext('2d').drawImage(L.c, x0, y0, bw, bh, 0, 0, bw, bh);
+  chunks.push({ c: cc, w: bw / DPR, h: bh / DPR, x: word.x + L.ox + (x0 + bw / 2) / DPR, y: word.y + L.oy + (y0 + bh / 2) / DPR, vx, vy, a: 0, va });
+  L.on = false;
+}
+
+function shatter(C) {   // a falling chunk hits the floor: jittered triangle grid -> shards
+  const cell = clamp(FS * .13, 8, 22), nx = Math.max(1, Math.round(C.w / cell)), ny = Math.max(1, Math.round(C.h / cell)), P = [];
+  for (let j = 0; j <= ny; j++) {
+    P.push([]);
+    for (let i = 0; i <= nx; i++) {
+      const inner = i > 0 && i < nx && j > 0 && j < ny;
+      P[j].push([i * C.w / nx + (inner ? rnd(-.35, .35) * C.w / nx : 0), j * C.h / ny + (inner ? rnd(-.35, .35) * C.h / ny : 0)]);
+    }
+  }
+  const cos = Math.cos(C.a), sin = Math.sin(C.a), imp = clamp(C.vy / 900, .35, 1.2);
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const a = P[j][i], b = P[j][i + 1], c = P[j + 1][i + 1], d = P[j + 1][i];
+    for (const t of Math.random() < .5 ? [[a, b, c], [a, c, d]] : [[a, b, d], [b, c, d]]) {
+      const p = cutPiece(C.c, t); if (!p) continue;
+      const lx = p.cx - C.w / 2, ly = p.cy - C.h / 2;
+      shards.push({ c: p.c, w: p.w, h: p.h, x: C.x + lx * cos - ly * sin, y: C.y + lx * sin + ly * cos, a: C.a, va: rnd(-12, 12), t: 0,
+        vx: C.vx * .35 + rnd(-340, 340) * imp + lx * 4, vy: -rnd(120, 480) * imp });
+    }
+  }
+  const fx = C.x, fy = floorAt(C.x);
+  shake = Math.max(shake, 3 + C.w * .04);
+  for (let i = 0; i < 10; i++) part('smoke', fx + rnd(-C.w / 2, C.w / 2), fy, rnd(-120, 120), -rnd(20, 90), rnd(.8, 1.6), 8, rnd(30, 60));
+  for (let i = 0; i < 16; i++) part('dust', fx + rnd(-C.w / 2, C.w / 2), fy - 4, rnd(-260, 260), -rnd(100, 420), rnd(.6, 1.3), rnd(1.5, 3), 0, Math.random() < .5 ? INK.mid : INK.side);
+  play('crash', clamp(C.w / 50, .35, 1), .05);
+}
+
+function bake(s) {   // a shard at rest is painted into the floor layer for good
+  floorCtx.save(); floorCtx.translate(s.x, s.y); floorCtx.rotate(s.a); floorCtx.drawImage(s.c, -s.w / 2, -s.h / 2, s.w, s.h); floorCtx.restore();
+  const hw = Math.max(2, Math.abs(s.w / 2 * Math.cos(s.a)) + Math.abs(s.h / 2 * Math.sin(s.a))), cap = H * .06;
+  const rise = s.w * s.h * .25 / (hw * 2);   // the shard's area spread over its footprint, loosely packed
+  for (let x = s.x - hw; x <= s.x + hw; x += 4) { const i = clamp(x / 4 | 0, 0, pile.length - 1); pile[i] = Math.min(cap, pile[i] + rise); }
+  s.baked = true;
+}
+
+// ---------- weapon ----------
+function gun() {
+  const BW = clamp(W * .13, 120, 200), k = BW / BZ.w;
+  return { BW, k, piv: { x: W / 2, y: floorY - BZ.pivotX * k * .82 }, cx: Math.cos(aim), cy: Math.sin(aim), RL: BW * .36 };
+}
+
+function fire() {
+  if (cooldown > 0) return;
+  cooldown = .45; fired++; recoil = 1; shake = Math.max(shake, 3);
+  play('launch', .55);
+  const { k, piv, cx, cy, RL } = gun();
+  const mzx = piv.x + cx * (BZ.w - BZ.pivotX) * k, mzy = piv.y + cy * (BZ.w - BZ.pivotX) * k;
+  rockets.push({ x: mzx - cx * RL * .55, y: mzy - cy * RL * .55, a: aim, sp: 520, d: 0 });
+  for (let i = 0; i < 8; i++) part('fire', mzx + cx * rnd(0, 15), mzy + cy * rnd(0, 15), cx * rnd(40, 180) + rnd(-30, 30), cy * rnd(40, 180) + rnd(-30, 30), rnd(.12, .25), rnd(4, 8), rnd(12, 22));
+  const rx = piv.x - cx * BZ.pivotX * k, ry = piv.y - cy * BZ.pivotX * k;   // back-blast out of the rear
+  for (let i = 0; i < 10; i++) part('fire', rx, ry, -cx * rnd(150, 450) + rnd(-60, 60), -cy * rnd(150, 450) + rnd(-60, 60), rnd(.12, .3), rnd(5, 10), rnd(16, 32));
+  for (let i = 0; i < 14; i++) part('smoke', rx, ry, -cx * rnd(60, 300) + rnd(-50, 50), -cy * rnd(60, 300) + rnd(-50, 50), rnd(1, 2.2), rnd(6, 12), rnd(28, 60));
+}
+
+function impact(r, h, x, y) {
+  r.dead = true;
+  const cx = Math.cos(r.a), cy = Math.sin(r.a);
+  if (h.kind === 'gap') {
+    boom(x, y, FS * .2);
+    dropLetter(h.L, h.side * rnd(60, 160) + word.vx * .5, -rnd(150, 300) + word.vy * .5, h.side * rnd(1, 3));
+    return;
+  }
+  const R = FS * rnd(.27, .36), bx = x + cx * R * .25, by = y + cy * R * .25;   // centre a little inside the surface
+  boom(x, y, R);
+  for (const L of letters) {
+    if (!L.on) continue;
+    const rx = word.x + L.ox, ry = word.y + L.oy, nx = clamp(bx, rx, rx + L.w), ny = clamp(by, ry, ry + L.h);
+    if (Math.hypot(bx - nx, by - ny) < R * 1.15) carve(L, bx, by, R, cx, cy);
+  }
+}
+
+// ---------- particles ----------
+function part(type, x, y, vx, vy, life, s0, s1, col) { parts.push({ type, x, y, vx, vy, life, s0, s1, col, t: 0 }); }
+function boom(x, y, R) {
+  shake = Math.max(shake, R * .25);
+  play('blast', clamp(R / 30, .4, 1)); play('rumble', clamp(R / 40, .25, .7), .15);
+  part('fire', x, y, 0, 0, .12, R * 1.5, R * 3.2);
+  part('ring', x, y, 0, 0, .35, R * .3, R * 2.6);
+  for (let i = 0; i < 18; i++) { const a = rnd(0, 6.283), v = rnd(40, 320); part('fire', x + Math.cos(a) * R * .2, y + Math.sin(a) * R * .2, Math.cos(a) * v, Math.sin(a) * v, rnd(.25, .6), R * rnd(.25, .45), R * rnd(.6, 1.1)); }
+  for (let i = 0; i < 16; i++) { const a = rnd(0, 6.283), v = rnd(30, 200); part('smoke', x, y, Math.cos(a) * v, Math.sin(a) * v - 30, rnd(1.4, 2.8), R * .4, R * rnd(1, 1.8)); }
+  for (let i = 0; i < 28; i++) { const a = rnd(0, 6.283), v = rnd(300, 900); part('spark', x, y, Math.cos(a) * v, Math.sin(a) * v, rnd(.25, .7)); }
+  for (let i = 0; i < 24; i++) { const a = rnd(0, 6.283), v = rnd(80, 420); part('dust', x, y, Math.cos(a) * v, Math.sin(a) * v - 120, rnd(.8, 1.8), rnd(1.5, 3.5), 0, Math.random() < .5 ? INK.mid : INK.back); }
+}
+
+// ---------- simulation ----------
+function update(dt) {
+  cooldown -= dt; recoil *= Math.exp(-dt * 9); shake *= Math.exp(-dt * 9);
+  aim += (aimTarget - aim) * Math.min(1, dt * 18);
+
+  const left = letters.reduce((s, L) => s + (L.on ? L.n : 0), 0), damage = 1 - left / total0;
+  word.phase += dt * (.55 + .9 * damage);   // it gets nervous as it breaks
+  const ax = Math.max(0, (W - wordInk.w) / 2 - 24);
+  const nx = W / 2 + ax * Math.sin(word.phase), ny = H * .3 + H * .1 * Math.sin(word.phase * 1.7 + .6);
+  word.vx = (nx - word.x) / dt; word.vy = (ny - word.y) / dt; word.x = nx; word.y = ny;
+
+  const { RL } = gun(), RH = RL / 8;
+  for (const r of rockets) {
+    r.sp = Math.min(1500, r.sp + 2600 * dt);
+    const cx = Math.cos(r.a), cy = Math.sin(r.a), dist = r.sp * dt, steps = Math.max(1, Math.ceil(dist / 3));
+    for (let s = 0; s < steps && !r.dead; s++) {   // sub-steps so a fast rocket cannot tunnel through a thin stroke
+      r.x += cx * dist / steps; r.y += cy * dist / steps; r.d += dist / steps;
+      const hx = r.x + cx * RL / 2, hy = r.y + cy * RL / 2, h = testHit(hx, hy);
+      if (h) impact(r, h, hx, hy);
+    }
+    if (!r.dead && r.d > RL * .9) {
+      const tx = r.x - cx * RL / 2, ty = r.y - cy * RL / 2;
+      part('fire', tx, ty, -cx * 120 + rnd(-30, 30), -cy * 120 + rnd(-30, 30), rnd(.06, .12), RH * .6, RH * 1.2);
+      part('smoke', tx, ty, -cx * 40 + rnd(-20, 20), -cy * 40 + rnd(-20, 20), rnd(.6, 1.2), RH * .4, RH * rnd(1.5, 2.6));
+    }
+    if (r.x < -300 || r.x > W + 300 || r.y < -300) r.dead = true;
+  }
+  rockets = rockets.filter(r => !r.dead);
+
+  for (const C of chunks) {
+    C.vy += G * dt; C.x += C.vx * dt; C.y += C.vy * dt; C.a += C.va * dt;
+    if (C.x < 0 || C.x > W) { C.vx = -C.vx * .5; C.x = clamp(C.x, 0, W); }
+    const hy = Math.abs(C.w / 2 * Math.sin(C.a)) + Math.abs(C.h / 2 * Math.cos(C.a));
+    if (C.y + hy >= floorAt(C.x)) { C.y = floorAt(C.x) - hy; shatter(C); C.dead = true; }
+  }
+  chunks = chunks.filter(C => !C.dead);
+
+  for (const s of shards) {
+    s.t += dt; s.vy += G * dt; s.x += s.vx * dt; s.y += s.vy * dt; s.a += s.va * dt;
+    if (s.x < 0 || s.x > W) { s.vx = -s.vx * .5; s.x = clamp(s.x, 0, W); }
+    const hy = Math.abs(s.w / 2 * Math.sin(s.a)) + Math.abs(s.h / 2 * Math.cos(s.a)), fa = floorAt(s.x);
+    if (s.y + hy >= fa) {
+      s.y = fa - hy;
+      if (s.vy > 300) play('tink', clamp(s.w * s.h / 400, .08, .3), .035);
+      if (s.vy > 0) s.vy = -s.vy * .25;
+      s.vx *= .8; s.va *= .6;
+      if ((Math.abs(s.vy) < 40 && Math.abs(s.vx) < 25) || s.t > 7) bake(s);
+    }
+  }
+  if (shards.length > 1500) shards.slice(0, shards.length - 1500).forEach(bake);
+  shards = shards.filter(s => !s.baked);
+
+  for (const p of parts) {
+    p.t += dt;
+    if (p.type === 'fire' || p.type === 'smoke') { const k = Math.exp(-dt * 3); p.vx *= k; p.vy *= k; if (p.type === 'smoke') p.vy -= 30 * dt; }
+    else if (p.type === 'spark' || p.type === 'dust') p.vy += G * .6 * dt;
+    p.x += p.vx * dt; p.y += p.vy * dt;
+  }
+  parts = parts.filter(p => p.t < p.life);
+
+  if (!won && !letters.some(L => L.on) && !chunks.length) { won = true; wonAt = now; }
+  if (won && now - wonAt > 1.2 && winEl.style.display !== 'grid') {
+    document.getElementById('winText').textContent = `${fired} rocket${fired === 1 ? '' : 's'}`;
+    winEl.style.display = 'grid';
+  }
+  hud.textContent = `${Math.round(damage * 100)} % destroyed · ${fired} rocket${fired === 1 ? '' : 's'}`;
+}
+
+function drawRot(o) { ctx.save(); ctx.translate(o.x, o.y); ctx.rotate(o.a); ctx.drawImage(o.c, -o.w / 2, -o.h / 2, o.w, o.h); ctx.restore(); }
+
+function draw() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, cv.width, cv.height);
+  const sx = rnd(-shake, shake), sy = rnd(-shake, shake);
+  ctx.setTransform(DPR, 0, 0, DPR, sx * DPR, sy * DPR);
+
+  const gg = ctx.createLinearGradient(0, floorY, 0, H);
+  gg.addColorStop(0, THEME.top); gg.addColorStop(1, THEME.bottom);
+  ctx.fillStyle = gg; ctx.fillRect(-20, floorY, W + 40, H - floorY + 20);
+  ctx.fillStyle = THEME.line; ctx.fillRect(-20, floorY, W + 40, 1.5);
+  ctx.drawImage(floorCv, 0, 0, W, H);
+
+  for (const L of letters) if (L.on) ctx.drawImage(L.c, word.x + L.ox, word.y + L.oy, L.w, L.h);
+  chunks.forEach(drawRot);
+  shards.forEach(drawRot);
+
+  const { BW, k, piv, cx, cy, RL } = gun(), RH = RL / 8;
+  for (const r of rockets) { ctx.save(); ctx.translate(r.x, r.y); ctx.rotate(r.a); ctx.drawImage(imgR, -RL / 2, -RH / 2, RL, RH); ctx.restore(); }
+
+  ctx.fillStyle = THEME.shadow;
+  ctx.beginPath(); ctx.ellipse(piv.x, floorY + 2, BW * .32, 4, 0, 0, 6.283); ctx.fill();
+  ctx.save();
+  ctx.translate(piv.x - cx * recoil * BW * .04, piv.y - cy * recoil * BW * .04);
+  ctx.rotate(aim);
+  if (aim < -Math.PI / 2) ctx.scale(1, -1);   // keep the grip underneath when aiming left
+  ctx.drawImage(imgB, -BZ.pivotX * k, -BZ.axisY * k, BZ.w * k, BZ.h * k);
+  ctx.restore();
+
+  for (const p of parts) {
+    const q = p.t / p.life;
+    if (p.type === 'smoke') { const s = p.s0 + (p.s1 - p.s0) * Math.sqrt(q); ctx.globalAlpha = Math.sin(Math.PI * q) * .55; ctx.drawImage(SMOKE, p.x - s, p.y - s, s * 2, s * 2); }
+    else if (p.type === 'dust') { ctx.globalAlpha = 1 - q; ctx.fillStyle = p.col; ctx.fillRect(p.x, p.y, p.s0, p.s0); }
+  }
+  ctx.globalCompositeOperation = THEME.blend;   // additive glow on dark; plain paint on light, where 'lighter' turns white
+  for (const p of parts) {
+    const q = p.t / p.life;
+    if (p.type === 'fire') { const s = p.s0 + (p.s1 - p.s0) * Math.sqrt(q); ctx.globalAlpha = (1 - q) ** 1.5; ctx.drawImage(FIRE, p.x - s, p.y - s, s * 2, s * 2); }
+    else if (p.type === 'spark') { ctx.globalAlpha = 1 - q; ctx.strokeStyle = '#ffc860'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x - p.vx * .03, p.y - p.vy * .03); ctx.stroke(); }
+    else if (p.type === 'ring') { const s = p.s0 + (p.s1 - p.s0) * Math.sqrt(q); ctx.globalAlpha = (1 - q) * .6; ctx.strokeStyle = '#ffe6b4'; ctx.lineWidth = 6 * (1 - q) + .5; ctx.beginPath(); ctx.arc(p.x, p.y, s, 0, 6.283); ctx.stroke(); }
+  }
+  for (const r of rockets) {   // exhaust flame
+    const c = Math.cos(r.a), s = Math.sin(r.a), f = rnd(.8, 1.2);
+    ctx.globalAlpha = .9; ctx.save(); ctx.translate(r.x - c * (RL / 2 + RH * .7), r.y - s * (RL / 2 + RH * .7)); ctx.rotate(r.a);
+    ctx.drawImage(FIRE, -RH * 1.4 * f, -RH * .7, RH * 2.8 * f, RH * 1.4); ctx.restore();
+  }
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+}
+
+let last = 0;
+function loop(t) {
+  const dt = Math.min(.033, (t - last) / 1000 || .016); last = t; now = t / 1000;
+  update(dt); draw();
+  requestAnimationFrame(loop);
+}
+
+function reset() {
+  rockets = []; chunks = []; shards = []; parts = [];
+  floorCtx.clearRect(0, 0, W, H); pile.fill(0);
+  fired = 0; won = false; winEl.style.display = 'none'; word.phase = 0;
+  buildWord();
+}
+
+function setAim(e) {
+  const { piv } = gun();
+  let a = Math.atan2(e.clientY - piv.y, e.clientX - piv.x);
+  if (a > 0) a = a > Math.PI / 2 ? -Math.PI : 0;
+  aimTarget = clamp(a, -Math.PI + .12, -.12);
+}
+cv.addEventListener('pointermove', setAim);
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  if (AC && AC.state === 'suspended') AC.resume();   // browsers start audio only after a tap or click
+  if (won) { if (now - wonAt > 1.2) reset(); return; }
+  setAim(e); aim = aimTarget; fire();
+});
+addEventListener('keydown', e => {
+  if (e.key === 'r' || e.key === 'R') reset();
+  if (e.key === 'm' || e.key === 'M') setMuted(!muted);
+});
+document.getElementById('mute').addEventListener('click', () => { if (AC && AC.state === 'suspended') AC.resume(); setMuted(!muted); });
+setMuted(muted);
+addEventListener('resize', resize);
+
+function selfTest() {   // open index.html#test, read the console
+  const L = letters[2], n0 = L.n, before = shards.length;
+  impact({ a: -Math.PI / 2 }, { kind: 'letter' }, word.x + L.ox + (L.ink.x0 + L.ink.x1) / 2, word.y + L.oy + L.ink.y1);
+  console.assert(L.n < n0 * .8 && shards.length > before, 'blast should remove pixels and make shards');
+  const A = letters[5], B = letters[6], gx = word.x + (A.ox + A.ink.x1 + B.ox + B.ink.x0) / 2, gy = word.y + A.oy + (A.ink.y0 + A.ink.y1) / 2;
+  const h = testHit(gx, gy);
+  console.assert(h && h.kind === 'gap', 'point between letters should be a gap hit', h);
+  console.log(`self-test done: removed ${n0 - L.n} px, ${shards.length - before} shards, gap=${h && h.kind}`);
+}
+
+Promise.all([imgB.decode(), imgR.decode(), Promise.race([document.fonts.load(`100px "Archivo Black"`), new Promise(r => setTimeout(r, 2500))])])
+  .then(() => {
+    readTheme(); resize(); buildWord(); word.x = W / 2; word.y = H * .3;
+    if (location.hash === '#test') selfTest();
+    requestAnimationFrame(loop);
+  })
+  .catch(e => { hud.textContent = 'could not load assets/: ' + e; });
+</script>
+</body>
+</html>
