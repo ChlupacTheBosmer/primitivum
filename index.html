@@ -532,6 +532,9 @@ addEventListener('keydown', e => {
   if (e.key === 'm' || e.key === 'M') setMuted(!muted);
 });
 document.getElementById('mute').addEventListener('click', () => { if (AC && AC.state === 'suspended') AC.resume(); setMuted(!muted); });
+// a touch only counts as permission to start audio when the finger lifts, so unlock there too;
+// sounds queued while suspended play as soon as the context resumes
+for (const ev of ['pointerup', 'touchend', 'click']) addEventListener(ev, () => { if (AC && AC.state === 'suspended') AC.resume(); }, { passive: true });
 setMuted(muted);
 addEventListener('resize', resize);
 
